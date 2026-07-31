@@ -1,0 +1,7 @@
+flask
+gunicorn
+langchain-core
+langchain-ollama
+langgraph
+psycopg2-binary
+pymongo

@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: databasechatai
+    runtime: docker
+    plan: pro          # Gemma needs real RAM; downsize in the Render dashboard only after you've checked actual memory usage
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: OLLAMA_MODEL
+        value: gemma4:e4b
+      - key: OLLAMA_BASE_URL
+        value: http://127.0.0.1:11434
+      - key: OLLAMA_MODELS
+        value: /data/ollama-models
+    disk:
+      name: ollama-models
+      mountPath: /data
+      sizeGB: 20        # holds the pulled model so it isn't re-downloaded on every deploy/restart
