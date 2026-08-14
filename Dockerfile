@@ -14,7 +14,7 @@ COPY . .
 RUN chmod +x entrypoint.sh
 
 ENV OLLAMA_BASE_URL=http://127.0.0.1:11434 \
-    OLLAMA_MODEL=gemma4:e4b \
+    OLLAMA_MODEL=gemma4:31b-cloud \
     OLLAMA_MODELS=/data/ollama-models \
     PORT=10000
 

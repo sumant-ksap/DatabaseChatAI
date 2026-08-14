@@ -2,11 +2,11 @@ services:
   - type: web
     name: databasechatai
     runtime: docker
-    plan: free         # 512MB RAM, no disk — gemma4:e4b will very likely OOM on startup, see DEPLOY.md
+    plan: free         # gemma4:31b-cloud runs on Ollama's servers, not in this container, so Free's RAM is no longer the blocker — auth is. See DEPLOY.md.
     dockerfilePath: ./Dockerfile
     envVars:
       - key: OLLAMA_MODEL
-        value: gemma4:e4b
+        value: gemma4:31b-cloud
       - key: OLLAMA_BASE_URL
         value: http://127.0.0.1:11434
       - key: OLLAMA_MODELS

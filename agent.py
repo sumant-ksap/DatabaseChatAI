@@ -63,7 +63,7 @@ tools = [get_db_schema, execute_sql_query, find_mongo_documents]
 # ── Model ─────────────────────────────────────────────────────────────────────
 
 llm = ChatOllama(
-    model=os.environ.get("OLLAMA_MODEL", "gemma4:e4b"),
+    model=os.environ.get("OLLAMA_MODEL", "gemma4:31b-cloud"),
     temperature=0,
     base_url=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
 )

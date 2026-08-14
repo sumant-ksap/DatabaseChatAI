@@ -2,7 +2,7 @@
 set -e
 
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:31b-cloud}"
 PORT="${PORT:-10000}"
 
 mkdir -p "${OLLAMA_MODELS:-/root/.ollama/models}"
