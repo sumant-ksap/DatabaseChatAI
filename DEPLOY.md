@@ -20,24 +20,31 @@ first: `git pull --rebase origin main`, resolve anything, then push.
 2. Connect your GitHub account/repo if you haven't already, then pick
    `sumant-ksap/DatabaseChatAI`.
 3. Render reads `render.yaml` from the repo root and proposes one service:
-   `databasechatai` (Docker runtime, plan `pro`, 20GB disk mounted at `/data`).
+   `databasechatai` (Docker runtime, plan `free`).
 4. Review and click **Apply** to create it.
 
 If you'd rather not use the Blueprint, you can instead click **New → Web
 Service**, point it at the repo, and it will auto-detect the `Dockerfile`.
-In that case add the disk and env vars from `render.yaml` manually in the
-service's **Disks** and **Environment** tabs.
 
-## 3. Sizing (important)
+## 3. Sizing (important — read this if the deploy fails)
 
-`gemma4:e4b` is a multi-GB model that Ollama loads into RAM. The `render.yaml`
-here defaults to the **Pro** plan as a safe starting point — adjust up/down
-in the Render dashboard once you see actual memory usage in the service's
-**Metrics** tab. Free/Starter plans (512MB–2GB RAM) will very likely OOM.
+`render.yaml` is currently set to the **Free** plan so it deploys with no
+payment info required. Be aware this is very likely **not enough to actually
+run the app**: `gemma4:e4b` is a multi-GB model that Ollama loads into RAM,
+and Free gives only 512MB with no disk. Expect the container to be OOM-killed
+on startup, or the model to never finish pulling before Render's health check
+times out.
 
-The attached disk (`/data`, 20GB) caches the pulled model so redeploys and
-restarts don't re-download it every time — without a disk, every restart
-re-pulls the model and cold-starts slowly.
+Free also has no disk, so `OLLAMA_MODELS` points at a path on the
+container's own ephemeral filesystem — even if it did start successfully,
+every restart or spin-down (Free services sleep after 15 min idle) would
+force a full model re-download.
+
+If you hit exactly this failure in the Logs tab, the fix is to move to a
+paid plan (`pro` is what this file used before, with a 20GB disk mounted at
+`/data` for the model) — see the git history of this file for that config —
+or swap the app to call a hosted LLM API instead of local Ollama, which
+would let Free actually work.
 
 ## 4. First boot
 
