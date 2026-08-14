@@ -354,6 +354,10 @@ HTML = """
 </div>
 
 <script>
+// Skip ngrok's browser-warning interstitial so it never intercepts our fetch() calls.
+const _fetch = window.fetch;
+window.fetch = (url, opts = {}) => _fetch(url, { ...opts, headers: { ...(opts.headers || {}), 'ngrok-skip-browser-warning': 'true' } });
+
 // ── State ──────────────────────────────────────────────────────────────────
 let connected   = false;
 let activeTable = null;
