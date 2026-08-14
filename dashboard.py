@@ -1,7 +1,79 @@
+import sqlite3
+
 from flask import Flask, jsonify, render_template_string
-from database import get_connection, setup_database, _rows
 
 app = Flask(__name__)
+
+DB_PATH = "yard_management.db"
+
+# ── SQLite helpers ───────────────────────────────────────────────────────────
+# Standalone demo dashboard over the bundled yard_management.db — deliberately
+# separate from database.py, which is the generic Postgres/MongoDB connector
+# the main chat agent (app.py) uses for user-supplied databases.
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def setup_database() -> None:
+    conn = get_connection()
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS shipments (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                tracking_number TEXT NOT NULL,
+                type            TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                carrier         TEXT,
+                origin          TEXT,
+                destination     TEXT,
+                weight_kg       REAL,
+                units           INTEGER,
+                dock_door       TEXT,
+                scheduled_at    TEXT,
+                arrived_at      TEXT,
+                departed_at     TEXT,
+                created_at      TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS trailers (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                plate_number TEXT NOT NULL,
+                carrier      TEXT,
+                driver_name  TEXT,
+                status       TEXT NOT NULL,
+                shipment_id  INTEGER,
+                arrived_at   TEXT,
+                departed_at  TEXT
+            );
+            CREATE TABLE IF NOT EXISTS dock_doors (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                door_number TEXT NOT NULL,
+                door_type   TEXT DEFAULT 'standard',
+                status      TEXT NOT NULL,
+                shipment_id INTEGER,
+                assigned_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS yard_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type  TEXT NOT NULL,
+                shipment_id INTEGER,
+                trailer_id  INTEGER,
+                door_number TEXT,
+                notes       TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
+    cur = conn.execute(sql, params)
+    return [dict(row) for row in cur.fetchall()]
+
 
 # ── API endpoints ──────────────────────────────────────────────────────────────
 
