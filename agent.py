@@ -62,11 +62,25 @@ tools = [get_db_schema, execute_sql_query, find_mongo_documents]
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
-llm = ChatOllama(
-    model=os.environ.get("OLLAMA_MODEL", "gemma4:31b-cloud"),
-    temperature=0,
-    base_url=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-)
+_ollama_model = os.environ.get("OLLAMA_MODEL", "gemma4:31b-cloud")
+_ollama_api_key = os.environ.get("OLLAMA_API_KEY", "")
+
+if _ollama_api_key:
+    # The local ollama daemon only proxies :cloud models on behalf of an
+    # `ollama signin`-authenticated machine — OLLAMA_API_KEY doesn't apply to
+    # that path. Call Ollama Cloud's API directly instead, which does accept it.
+    llm = ChatOllama(
+        model=_ollama_model.removesuffix("-cloud"),
+        temperature=0,
+        base_url="https://ollama.com",
+        client_kwargs={"headers": {"Authorization": f"Bearer {_ollama_api_key}"}},
+    )
+else:
+    llm = ChatOllama(
+        model=_ollama_model,
+        temperature=0,
+        base_url=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+    )
 llm_with_tools = llm.bind_tools(tools)
 
 SYSTEM_PROMPT = SystemMessage(content=(

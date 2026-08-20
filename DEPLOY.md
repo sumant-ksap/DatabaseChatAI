@@ -39,16 +39,26 @@ the failure shows up later, at chat time, when the daemon actually proxies
 a request to `ollama.com` and gets back `401 Unauthorized` because it isn't
 signed in to any account.
 
-The fix is `OLLAMA_API_KEY`, Ollama Cloud's headless-auth env var (an
-alternative to the interactive `ollama signin` flow, which needs a browser
-and isn't practical in a container):
+Setting `OLLAMA_API_KEY` in Render's Environment tab is necessary but **not
+sufficient** on its own: that env var only authenticates direct calls to
+`https://ollama.com/api`. The *local* `ollama serve` daemon (what `agent.py`
+talks to at `OLLAMA_BASE_URL`) proxies `:cloud` models on behalf of an
+`ollama signin`-authenticated machine, which is a completely different,
+interactive, browser-based auth path — `OLLAMA_API_KEY` doesn't plug into
+it. That's why the 401 persisted even after the key was added.
+
+`agent.py` now checks for `OLLAMA_API_KEY` itself: when it's set, it builds
+`ChatOllama` pointed straight at `https://ollama.com` with the key as a
+Bearer header (bypassing the local daemon's proxy path entirely, and
+dropping the `-cloud` suffix, which only means something to the local
+proxy). When it's unset, it falls back to `OLLAMA_BASE_URL` /
+`http://127.0.0.1:11434` as before, so local dev backed by a signed-in
+`ollama` install keeps working unchanged. So the full fix is:
 1. Generate a key at https://ollama.com/settings/keys.
 2. In Render → this service → **Environment**, set `OLLAMA_API_KEY` to that
    value (it's declared in `render.yaml` with `sync: false`, so Render will
    prompt for it there rather than storing it in the repo).
-3. Redeploy. `entrypoint.sh` starts `ollama serve` as a child process, which
-   inherits the container's env vars automatically — no script change needed
-   for the daemon to pick up the key.
+3. Redeploy so the updated `agent.py` ships and picks up the key.
 
 This repo deliberately does **not** bake any key into the Docker image or
 commit one to git — that would leak a credential tied to a personal Ollama
