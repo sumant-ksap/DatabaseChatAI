@@ -26,30 +26,37 @@ first: `git pull --rebase origin main`, resolve anything, then push.
 If you'd rather not use the Blueprint, you can instead click **New → Web
 Service**, point it at the repo, and it will auto-detect the `Dockerfile`.
 
-## 3. Cloud model auth (important — read this if the deploy fails)
+## 3. Cloud model auth (important — read this if chat requests 401)
 
 `OLLAMA_MODEL` is set to `gemma4:31b-cloud`. Unlike `gemma4:e4b`, this model
 doesn't run inside the container at all — Ollama just proxies inference
 requests to Ollama's cloud servers. That means Render's Free plan (512MB RAM,
 no disk) is no longer the bottleneck for this model. **Authentication is.**
 
-The container's `ollama` daemon has no identity of its own: cloud model
-access is tied to an Ollama account via a keypair (`~/.ollama/id_ed25519` on
-a signed-in machine). A fresh container has never run `ollama signin`, so
-`ollama pull gemma4:31b-cloud` will fail there with an auth error. This repo
-deliberately does **not** bake any private key into the Docker image or
+`ollama pull gemma4:31b-cloud` only fetches a small remote-pointer manifest,
+so the container boots and the deploy succeeds even with no identity —
+the failure shows up later, at chat time, when the daemon actually proxies
+a request to `ollama.com` and gets back `401 Unauthorized` because it isn't
+signed in to any account.
+
+The fix is `OLLAMA_API_KEY`, Ollama Cloud's headless-auth env var (an
+alternative to the interactive `ollama signin` flow, which needs a browser
+and isn't practical in a container):
+1. Generate a key at https://ollama.com/settings/keys.
+2. In Render → this service → **Environment**, set `OLLAMA_API_KEY` to that
+   value (it's declared in `render.yaml` with `sync: false`, so Render will
+   prompt for it there rather than storing it in the repo).
+3. Redeploy. `entrypoint.sh` starts `ollama serve` as a child process, which
+   inherits the container's env vars automatically — no script change needed
+   for the daemon to pick up the key.
+
+This repo deliberately does **not** bake any key into the Docker image or
 commit one to git — that would leak a credential tied to a personal Ollama
 account into a public repo and Render's build logs.
 
-Until this is solved, expect the deploy to fail at the `ollama pull` step in
-the Logs tab with an authentication/unauthorized error. Real fixes, in order
-of preference:
-- Check whether Ollama Cloud supports an API-key-style env var for headless
-  auth (rather than the interactive `ollama signin` flow) and set it via
-  Render's **Environment → Secret** (never a plain env var, never committed).
-- Fall back to `gemma4:e4b` for the deployed instance specifically (it has no
-  auth requirement, just a RAM/disk one — see this file's git history for
-  the paid-plan config that supports it).
+Fallback: `gemma4:e4b` runs in-container with no auth requirement, just a
+RAM/disk one — see this file's git history for the paid-plan config that
+supports it.
 
 ## 4. First boot
 
@@ -74,6 +81,7 @@ session, not stored in the repo or env vars.
 | `OLLAMA_MODEL`      | `gemma4:31b-cloud`          | Model Ollama pulls and serves         |
 | `OLLAMA_BASE_URL`   | `http://127.0.0.1:11434`    | Where agent.py reaches Ollama         |
 | `OLLAMA_MODELS`     | `/data/ollama-models`        | Where Ollama stores pulled models     |
+| `OLLAMA_API_KEY`    | none — must be set manually | Auth for `gemma4:31b-cloud` inference; get one at https://ollama.com/settings/keys |
 | `PORT`              | set by Render automatically | Port gunicorn binds to                |
 
 ## Local development
