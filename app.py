@@ -1,10 +1,24 @@
+import hmac
 import os
+import secrets
+from datetime import timedelta
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
 from agent import run_agent
 import database
 
 app = Flask(__name__)
+# Without a fixed SECRET_KEY, sessions are signed with a per-process key and
+# everyone is logged out whenever the server restarts.
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+)
+
+APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
@@ -70,6 +84,8 @@ HTML = """
     .btn-ghost     { background: var(--surface);  color: var(--text); border: 1px solid var(--border); }
     #btn-connect    { }
     #btn-disconnect { display: none; }
+    a.btn { text-decoration: none; }
+    .user-chip { font-size: .8rem; color: var(--muted); padding-left: 6px; border-left: 1px solid var(--border); }
 
     /* ── Setup overlay ── */
     #setup-overlay {
@@ -235,6 +251,8 @@ HTML = """
   <div class="spacer"></div>
   <button class="btn btn-primary" id="btn-connect"   onclick="showSetup()">Connect to Database</button>
   <button class="btn btn-danger"  id="btn-disconnect" onclick="disconnect()">Disconnect</button>
+  <span class="user-chip">{{ username }}</span>
+  <a class="btn btn-ghost" href="/logout">Sign out</a>
 </header>
 
 <!-- ── Setup Modal ────────────────────────────────────────────────────────── -->
@@ -363,7 +381,12 @@ HTML = """
 <script>
 // Skip ngrok's browser-warning interstitial so it never intercepts our fetch() calls.
 const _fetch = window.fetch;
-window.fetch = (url, opts = {}) => _fetch(url, { ...opts, headers: { ...(opts.headers || {}), 'ngrok-skip-browser-warning': 'true' } });
+window.fetch = async (url, opts = {}) => {
+  const res = await _fetch(url, { ...opts, headers: { ...(opts.headers || {}), 'ngrok-skip-browser-warning': 'true' } });
+  // Session expired or signed out in another tab — send the user back to the login page.
+  if (res.status === 401) window.location.href = '/login';
+  return res;
+};
 
 // ── State ──────────────────────────────────────────────────────────────────
 let connected   = false;
@@ -662,11 +685,127 @@ init();
 """
 
 
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Sign in — Database AI Agent</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #f4f6f9; --surface: #ffffff; --border: #dde3ea;
+      --accent: #1f4e9c; --accent-hover: #173d7a; --accent-soft: #e8eef8;
+      --text: #1f2937; --muted: #64748b; --red: #dc2626;
+    }
+    body {
+      font-family: 'Segoe UI', 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+      display: flex; align-items: center; justify-content: center; padding: 16px;
+    }
+    .login-card {
+      background: var(--surface); border: 1px solid var(--border); border-top: 3px solid var(--accent);
+      border-radius: 10px; padding: 36px 32px; width: 380px; max-width: 100%;
+      box-shadow: 0 20px 40px rgba(15, 23, 42, .10);
+    }
+    .logo { font-size: 1.1rem; font-weight: 700; margin-bottom: 4px; }
+    .logo span { color: var(--accent); }
+    .subtitle { font-size: .84rem; color: var(--muted); margin-bottom: 26px; }
+    label { display: block; font-size: .78rem; color: var(--muted); margin-bottom: 5px; font-weight: 600; letter-spacing: .4px; }
+    input {
+      width: 100%; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 10px 12px; color: var(--text); font-size: .9rem;
+      outline: none; margin-bottom: 16px; transition: border-color .15s;
+    }
+    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    button {
+      width: 100%; background: var(--accent); color: #fff; border: none; border-radius: 6px;
+      padding: 11px; font-size: .9rem; font-weight: 600; cursor: pointer; transition: background .15s;
+    }
+    button:hover { background: var(--accent-hover); }
+    .error {
+      background: #fef2f2; color: var(--red); border: 1px solid #fecaca;
+      border-radius: 6px; padding: 9px 12px; font-size: .82rem; margin-bottom: 16px;
+    }
+    .footer { margin-top: 22px; font-size: .74rem; color: var(--muted); text-align: center; }
+  </style>
+</head>
+<body>
+  <form class="login-card" method="post" action="/login">
+    <div class="logo">AI <span>Database</span> Agent</div>
+    <p class="subtitle">Sign in to continue</p>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username" value="{{ username }}" required autofocus/>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required/>
+    <input type="hidden" name="next" value="{{ next }}"/>
+    <button type="submit">Sign in</button>
+    <p class="footer">Authorised users only</p>
+  </form>
+</body>
+</html>
+"""
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+PUBLIC_ENDPOINTS = {"login", "logout", "static"}
+
+
+@app.before_request
+def require_login():
+    if request.endpoint in PUBLIC_ENDPOINTS or session.get("user"):
+        return None
+    if request.path.startswith("/api/") or request.path == "/chat":
+        return jsonify({"error": "Authentication required"}), 401
+    return redirect(url_for("login", next=request.path))
+
+
+def _check_credentials(username: str, password: str) -> bool:
+    if not APP_PASSWORD:
+        return False
+    user_ok = hmac.compare_digest(username.encode(), APP_USERNAME.encode())
+    pass_ok = hmac.compare_digest(password.encode(), APP_PASSWORD.encode())
+    return user_ok and pass_ok
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if session.get("user"):
+        return redirect(url_for("index"))
+    error, username = "", ""
+    next_path = request.values.get("next") or "/"
+    # Only allow local redirects after login.
+    if not next_path.startswith("/") or next_path.startswith("//") or "\\" in next_path:
+        next_path = "/"
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        if not APP_PASSWORD:
+            error = "Login is not configured. Set the APP_PASSWORD environment variable on the server."
+        elif _check_credentials(username, password):
+            session.clear()
+            session.permanent = True
+            session["user"] = username
+            return redirect(next_path)
+        else:
+            error = "Invalid username or password."
+    return render_template_string(LOGIN_HTML, error=error, username=username, next=next_path)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    return render_template_string(HTML, username=session.get("user", ""))
 
 
 @app.route("/api/status")
