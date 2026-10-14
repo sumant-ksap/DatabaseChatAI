@@ -1,9 +1,10 @@
 import json
 import re
 from collections import OrderedDict
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qsl, quote_plus, unquote, urlparse
 
 import psycopg2
+from psycopg2 import sql as pgsql
 from psycopg2.extras import RealDictCursor
 
 try:
@@ -46,7 +47,7 @@ def set_pg_config(url: str = "", host: str = "", port: int = 5432,
     _db_type = "postgres"
     _mongo_config = None
     if url:
-        _pg_config = {"dsn": url}
+        _pg_config = _parse_pg_url(url)
         _connection_display = "PostgreSQL " + _mask_url(url)
     else:
         _pg_config = {
@@ -91,7 +92,47 @@ def clear_config() -> None:
 
 
 def _mask_url(url: str) -> str:
-    return re.sub(r":([^:@/?#]+)@", ":***@", url)
+    # Greedy up to the last "@" before the host so passwords containing "@" stay hidden.
+    return re.sub(r"^([a-zA-Z][\w+.-]*://[^:/@]+):[^/?#]*@", r"\1:***@", url)
+
+
+def _parse_pg_url(url: str) -> dict:
+    """Split a postgres:// URL into psycopg2 connect() kwargs.
+
+    Unlike libpq's own URI parser, this tolerates an unencoded "@" (or ":") in
+    the password by splitting the credentials at the *last* "@" before the host.
+    Percent-encoded values are decoded too, so both forms work.
+    """
+    match = re.match(r"^postgres(?:ql)?://(?P<rest>.*)$", url.strip(), re.IGNORECASE)
+    if not match:
+        raise ValueError("PostgreSQL URL must start with postgresql:// or postgres://")
+    rest = match.group("rest")
+    rest, _, query = rest.partition("?")
+
+    userinfo, sep, hostpart = rest.rpartition("@")
+    if not sep:
+        userinfo, hostpart = "", rest
+    hostport, _, dbname = hostpart.partition("/")
+
+    if hostport.startswith("["):  # IPv6 literal, e.g. [::1]:5432
+        host, _, port = hostport[1:].partition("]")
+        port = port.lstrip(":")
+    else:
+        host, _, port = hostport.partition(":")
+
+    user, _, password = userinfo.partition(":")
+    config: dict = {
+        "host": unquote(host) or "localhost",
+        "port": int(port) if port else 5432,
+        "dbname": unquote(dbname) or "postgres",
+    }
+    if user:
+        config["user"] = unquote(user)
+    if password:
+        config["password"] = unquote(password)
+    for key, value in parse_qsl(query):  # e.g. sslmode=require
+        config[key] = value
+    return config
 
 
 def _database_from_mongo_url(url: str) -> str:
@@ -108,9 +149,7 @@ def _build_mongo_uri(host: str, port: int, user: str, password: str) -> str:
 def _get_pg_connection():
     if not _pg_config:
         raise RuntimeError("No PostgreSQL database connected. Please provide connection credentials.")
-    if "dsn" in _pg_config:
-        return psycopg2.connect(_pg_config["dsn"])
-    return psycopg2.connect(**_pg_config)
+    return psycopg2.connect(connect_timeout=15, **_pg_config)
 
 
 def _get_mongo_database():
@@ -154,23 +193,73 @@ def get_pg_schema_info() -> dict[str, list[dict]]:
     conn = _get_pg_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-                ORDER BY table_name
+            # One round trip for every table/view in every user schema — a
+            # per-table query is far too slow against remote databases with
+            # hundreds of tables.
+            cur.execute(f"""
+                SELECT t.table_schema, t.table_name,
+                       c.column_name, c.data_type, c.is_nullable
+                FROM information_schema.tables t
+                LEFT JOIN information_schema.columns c
+                       ON c.table_schema = t.table_schema AND c.table_name = t.table_name
+                WHERE t.table_type IN ('BASE TABLE', 'VIEW')
+                  AND {_USER_SCHEMA_FILTER}
+                ORDER BY (t.table_schema <> 'public'), t.table_schema, t.table_name, c.ordinal_position
             """)
-            tables = [row["table_name"] for row in cur.fetchall()]
             schema: dict[str, list[dict]] = {}
-            for table in tables:
-                cur.execute("""
-                    SELECT column_name, data_type, is_nullable
-                    FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = %s
-                    ORDER BY ordinal_position
-                """, (table,))
-                schema[table] = [dict(col) for col in cur.fetchall()]
+            for row in cur.fetchall():
+                cols = schema.setdefault(_qualified_name(row["table_schema"], row["table_name"]), [])
+                if row["column_name"] is not None:
+                    cols.append({
+                        "column_name": row["column_name"],
+                        "data_type": row["data_type"],
+                        "is_nullable": row["is_nullable"],
+                    })
         return schema
+    finally:
+        conn.close()
+
+
+_USER_SCHEMA_FILTER = (
+    "t.table_schema NOT IN ('pg_catalog', 'information_schema') "
+    "AND t.table_schema NOT LIKE 'pg\\_toast%%' AND t.table_schema NOT LIKE 'pg\\_temp%%'"
+)
+
+
+def _qualified_name(schema: str, table: str) -> str:
+    # Keep bare names for "public" so existing single-schema databases look the same as before.
+    return table if schema == "public" else f"{schema}.{table}"
+
+
+def _resolve_pg_table(cur, name: str) -> tuple[str, str]:
+    """Map a sidebar name ("table" or "schema.table") to its (schema, table)."""
+    cur.execute(f"""
+        SELECT t.table_schema, t.table_name
+        FROM information_schema.tables t
+        WHERE {_USER_SCHEMA_FILTER}
+          AND ((t.table_schema = 'public' AND t.table_name = %s)
+               OR t.table_schema || '.' || t.table_name = %s)
+        ORDER BY (t.table_schema <> 'public')
+        LIMIT 1
+    """, (name, name))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Table '{name}' not found.")
+    return row["table_schema"], row["table_name"]
+
+
+def get_pg_table_columns(name: str) -> list[dict]:
+    conn = _get_pg_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            schema, table = _resolve_pg_table(cur, name)
+            cur.execute("""
+                SELECT column_name, data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+            """, (schema, table))
+            return [dict(col) for col in cur.fetchall()]
     finally:
         conn.close()
 
@@ -200,6 +289,27 @@ def _collect_mongo_fields(doc: dict, fields: OrderedDict[str, set[str]], prefix:
             _collect_mongo_fields(value, fields, path)
 
 
+SCHEMA_TEXT_MAX_COLUMNS = 400
+
+
+def describe_table_text(name: str) -> str:
+    if _db_type == "mongodb":
+        cols = get_mongo_schema_info().get(name)
+        if cols is None:
+            return f"Collection '{name}' not found."
+    else:
+        try:
+            cols = get_pg_table_columns(name)
+        except Exception as exc:
+            return f"Error: {exc}"
+    if not cols:
+        return f"'{name}' has no columns."
+    return f'"{name}": ' + ", ".join(
+        f"{c['column_name']} ({c['data_type']})" + (" [nullable]" if c["is_nullable"] == "YES" else "")
+        for c in cols
+    )
+
+
 def get_schema_text() -> str:
     try:
         schema = get_schema_info()
@@ -215,7 +325,25 @@ def get_schema_text() -> str:
             lines.append(f'  Collection "{collection}": {defs}')
         return "\n".join(lines)
 
-    lines = ["PostgreSQL Database Schema:"]
+    total_columns = sum(len(cols) for cols in schema.values())
+    if total_columns > SCHEMA_TEXT_MAX_COLUMNS:
+        # Too big to send every column to the model — list table names grouped
+        # by schema and let it fetch columns per table with describe_table.
+        by_schema: OrderedDict[str, list[str]] = OrderedDict()
+        for name in schema:
+            schema_name = name.split(".", 1)[0] if "." in name else "public"
+            by_schema.setdefault(schema_name, []).append(name)
+        lines = [
+            f"PostgreSQL database with {len(schema)} tables/views across {len(by_schema)} schemas. "
+            "Columns are omitted because the schema is large: call describe_table with a table "
+            "name to see its columns before querying it. Always use the schema-qualified "
+            "names shown below in SQL (e.g. SELECT * FROM schema_name.table_name).",
+        ]
+        for schema_name, names in by_schema.items():
+            lines.append(f'  Schema "{schema_name}" ({len(names)}): ' + ", ".join(names))
+        return "\n".join(lines)
+
+    lines = ["PostgreSQL Database Schema (use these names, schema-qualified where shown, in SQL):"]
     for table, cols in schema.items():
         col_defs = ", ".join(
             f"{c['column_name']} ({c['data_type']})" + (" [nullable]" if c["is_nullable"] == "YES" else "")
@@ -237,15 +365,11 @@ def get_pg_table_data(table_name: str, limit: int = 100, offset: int = 0) -> dic
     conn = _get_pg_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_name = %s
-            """, (table_name,))
-            if not cur.fetchone():
-                raise ValueError(f"Table '{table_name}' not found in public schema.")
-            cur.execute(f'SELECT COUNT(*) AS n FROM "{table_name}"')
+            schema, table = _resolve_pg_table(cur, table_name)
+            ident = pgsql.Identifier(schema, table)
+            cur.execute(pgsql.SQL("SELECT COUNT(*) AS n FROM {}").format(ident))
             total = cur.fetchone()["n"]
-            cur.execute(f'SELECT * FROM "{table_name}" LIMIT %s OFFSET %s', (limit, offset))
+            cur.execute(pgsql.SQL("SELECT * FROM {} LIMIT %s OFFSET %s").format(ident), (limit, offset))
             rows = [dict(row) for row in cur.fetchall()]
             columns = [desc[0] for desc in cur.description] if cur.description else []
         return {"columns": columns, "rows": rows, "total": int(total)}

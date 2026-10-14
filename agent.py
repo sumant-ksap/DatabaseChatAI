@@ -5,7 +5,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, START, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_core.tools import tool
-from database import get_schema_text, execute_query, find_documents, format_query_results
+from database import get_schema_text, describe_table_text, execute_query, find_documents, format_query_results
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -21,6 +21,16 @@ def get_db_schema() -> str:
 
 
 @tool
+def describe_table(table_name: str) -> str:
+    """
+    Returns the columns and data types of one table, view or collection. Use the
+    exact name listed by get_db_schema, including the schema prefix if shown
+    (e.g. "sales.orders"). Call this when get_db_schema omits columns.
+    """
+    return describe_table_text(table_name)
+
+
+@tool
 def execute_sql_query(sql: str) -> str:
     """
     Execute a SQL query against the connected PostgreSQL database and return the
@@ -31,6 +41,7 @@ def execute_sql_query(sql: str) -> str:
     Example queries:
       SELECT * FROM "orders" LIMIT 10;
       SELECT COUNT(*) FROM "customers";
+      SELECT * FROM sales.invoices LIMIT 10;   -- table in a non-public schema
       SELECT status, COUNT(*) FROM "shipments" GROUP BY status;
     """
     try:
@@ -58,7 +69,7 @@ def find_mongo_documents(collection_name: str, filter_json: str = "{}", limit: i
         return f"MongoDB Error: {exc}"
 
 
-tools = [get_db_schema, execute_sql_query, find_mongo_documents]
+tools = [get_db_schema, describe_table, execute_sql_query, find_mongo_documents]
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -87,8 +98,11 @@ SYSTEM_PROMPT = SystemMessage(content=(
     "You are a data assistant connected to a live PostgreSQL or MongoDB database. "
     "You can explore the connected database and answer questions about its data.\n\n"
     "Workflow:\n"
-    "1. When asked about data, first call get_db_schema to understand what tables or collections exist.\n"
-    "2. For PostgreSQL, write PostgreSQL SQL and call execute_sql_query to fetch real data.\n"
+    "1. When asked about data, first call get_db_schema to understand what tables or collections exist. "
+    "If it omits columns, call describe_table for the tables you need.\n"
+    "2. For PostgreSQL, write PostgreSQL SQL and call execute_sql_query to fetch real data. "
+    "Tables may live in several schemas: always use schema-qualified names (schema.table) exactly as "
+    "get_db_schema lists them.\n"
     "3. For MongoDB, call find_mongo_documents with a collection name and JSON filter.\n"
     "4. Summarise the results clearly in plain language.\n\n"
     "Never fabricate data. Always derive your answers from actual query results. "

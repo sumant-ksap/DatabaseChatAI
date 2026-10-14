@@ -143,6 +143,18 @@ HTML = """
     .table-item:hover  { background: var(--card); color: var(--text); }
     .table-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
     .table-item .icon { font-size: .75rem; opacity: .6; }
+    .table-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #table-total { font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--accent); }
+    #sidebar-search-wrap { padding: 8px 8px 0; flex-shrink: 0; }
+    #sidebar-search {
+      width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+      padding: 6px 10px; color: var(--text); font-size: .8rem; outline: none;
+    }
+    #sidebar-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .schema-group {
+      padding: 10px 10px 4px; font-size: .68rem; font-weight: 700; color: var(--muted);
+      letter-spacing: .8px; text-transform: uppercase; display: flex; justify-content: space-between;
+    }
     #sidebar-loading { padding: 12px 16px; font-size: .8rem; color: var(--muted); }
 
     /* ── Content area ── */
@@ -323,7 +335,8 @@ HTML = """
 <div id="app">
   <!-- Sidebar -->
   <div id="sidebar">
-    <div id="sidebar-header">Tables</div>
+    <div id="sidebar-header"><span id="sidebar-title">Tables</span> <span id="table-total"></span></div>
+    <div id="sidebar-search-wrap"><input id="sidebar-search" type="text" placeholder="Search tables…" oninput="filterTables(this.value)"/></div>
     <div id="table-list">
       <div id="sidebar-loading" style="display:none">Loading…</div>
     </div>
@@ -438,7 +451,8 @@ function switchDbType(type) {
   document.getElementById('f-port').value = type === 'mongodb' ? '27017' : '5432';
   document.getElementById('f-user').placeholder = type === 'mongodb' ? 'optional' : 'postgres';
   document.getElementById('url-db-group').style.display = type === 'mongodb' ? '' : 'none';
-  document.getElementById('sidebar-header').textContent = type === 'mongodb' ? 'Collections' : 'Tables';
+  document.getElementById('sidebar-title').textContent = type === 'mongodb' ? 'Collections' : 'Tables';
+  document.getElementById('sidebar-search').placeholder = type === 'mongodb' ? 'Search collections…' : 'Search tables…';
   document.getElementById('data-title').textContent = type === 'mongodb' ? 'Select a collection' : 'Select a table';
   document.getElementById('data-placeholder-text').textContent = type === 'mongodb'
     ? 'Select a collection from the sidebar to view its documents'
@@ -497,6 +511,9 @@ async function disconnect() {
   document.getElementById('data-view').style.display  = 'none';
   document.getElementById('chat-view').style.display  = 'none';
   document.getElementById('table-list').innerHTML = '';
+  document.getElementById('table-total').textContent = '';
+  document.getElementById('sidebar-search').value = '';
+  allTables = []; tableFilter = '';
   showSetup();
 }
 
@@ -531,21 +548,65 @@ async function loadTables() {
     const data  = await res.json();
     list.innerHTML = '';
     if (!data.tables || data.tables.length === 0) {
+      allTables = [];
+      document.getElementById('table-total').textContent = '';
       const emptyLabel = dbType === 'mongodb' ? 'No collections found' : 'No tables found';
       list.innerHTML = `<div style="padding:12px;font-size:.8rem;color:var(--muted)">${emptyLabel}</div>`;
       return;
     }
-    data.tables.forEach(t => {
+    allTables = data.tables;
+    renderTables();
+  } catch(e) {
+    console.error('loadTables failed', e);
+    list.innerHTML = '<div style="padding:12px;font-size:.8rem;color:var(--red)">Error loading tables: ' + escHtml(String(e && e.message || e)) + '</div>';
+  }
+}
+
+let allTables = [];
+let tableFilter = '';
+
+function filterTables(q) {
+  tableFilter = q.trim().toLowerCase();
+  renderTables();
+}
+
+// Postgres names arrive as "table" (public schema) or "schema.table"; group them
+// under schema headings. Mongo collection names can contain dots, so never split those.
+function renderTables() {
+  const list = document.getElementById('table-list');
+  document.getElementById('table-total').textContent = allTables.length ? `(${allTables.length})` : '';
+  const shown = allTables.filter(t => !tableFilter || t.toLowerCase().includes(tableFilter));
+  list.innerHTML = '';
+  if (shown.length === 0) {
+    list.innerHTML = `<div style="padding:12px;font-size:.8rem;color:var(--muted)">No matching tables</div>`;
+    return;
+  }
+  const groups = new Map();
+  shown.forEach(t => {
+    const dot = t.indexOf('.');
+    const schema = (dbType === 'mongodb' || dot < 0) ? '' : t.slice(0, dot);
+    if (!groups.has(schema)) groups.set(schema, []);
+    groups.get(schema).push(t);
+  });
+  const showHeadings = groups.size > 1 || !groups.has('');
+  groups.forEach((tables, schema) => {
+    if (showHeadings) {
+      const h = document.createElement('div');
+      h.className = 'schema-group';
+      h.innerHTML = `<span>${escHtml(schema || 'public')}</span><span>${tables.length}</span>`;
+      list.appendChild(h);
+    }
+    tables.forEach(t => {
       const el = document.createElement('div');
-      el.className = 'table-item';
+      el.className = 'table-item' + (t === activeTable ? ' active' : '');
       el.dataset.table = t;
-      el.innerHTML = '<span class="icon">▤</span>' + escHtml(t);
+      el.title = t;
+      const label = (schema && showHeadings) ? t.slice(schema.length + 1) : t;
+      el.innerHTML = '<span class="icon">▤</span><span class="name">' + escHtml(label) + '</span>';
       el.onclick = () => loadTable(t);
       list.appendChild(el);
     });
-  } catch(e) {
-    list.innerHTML = '<div style="padding:12px;font-size:.8rem;color:var(--red)">Error loading tables</div>';
-  }
+  });
 }
 
 // ── Table data ─────────────────────────────────────────────────────────────
